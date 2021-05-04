@@ -1,0 +1,1623 @@
+---
+title: "Explorative Data Analysis"
+author: "Andreas Borup Joergensen, Mette Koch Moeller, Robert Hoestrup"
+date: "04-06-2021"
+output:
+  html_notebook:
+    code_folding: show
+    df_print: paged
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: no
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '2'
+---
+```{r setup, include=FALSE}
+### Generic preamble
+rm(list=ls())
+Sys.setenv(LANG = "en")
+options(scipen = 5)
+
+library(knitr)
+knitr::opts_chunk$set(warning=FALSE,
+                     message=FALSE,
+                     comment=FALSE, 
+                     fig.align="center"
+                     )
+```
+Downloading the required packages.
+```{r}
+library(tidyverse) #Collection of all the good stuff like dplyr, ggplot2 ect.
+library(magrittr) #For advanced piping
+library(recipes) #For imputing NA's
+library(lmtest) #For Granger Cuasality test
+library(ggpubr) #For mixing multiple plots together
+library(rtweet) #For saving as cvs file
+```
+
+# Downloading the data set 
+The data set is downloaded from [github](https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Data/DataCreation.csv).
+```{r}
+data <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Data/DataCreation.csv")
+```
+
+# Dealing with NA's
+When predicting the stock price, the different approaches can not handle missing values. First, check if the data set contains any NA's in the data set and how many.
+```{r}
+colSums(is.na(data)) %>% as.data.frame() %>% rename("NAs" = ".") %>% filter(NAs != 0)
+```
+The table shows there is one NA in *Novo Nordisk* and 64 in *OilPrice*. The high amount of NAs in oil price is because it follows the American stock exchange and has different days off. For this study, it is chosen to impute the NA's by using k-nearest neighbour (kNN). Before imputing the NA's, the distribution of the NA's is investigated.
+```{r}
+data %>%
+  filter(is.na(NovoNordisk)  |  is.na(OilPrice)) %>%
+  select(Date, NovoNordisk, OilPrice)
+```
+The NA's seems to have a fairly distribution and is imputed using kNN. 
+```{r}
+data %<>%
+  recipe(Date ~.) %>%
+  step_knnimpute(all_predictors()) %>%
+  prep() %>%
+  juice() %>%
+  relocate(Date)
+```
+
+# Exploration of the collected data set
+## Plotting the 
+Plotting the different values. Since *MaerskA*, *MaerskB* and *USD/DKK* is either rather high or rather low and therefore the y-axis is scaled. 
+```{r}
+total_data <- gather(data, Company, Value, -Date)
+
+total_data %>%
+  ggplot(aes(x = Date, y = Value, color = Company)) +
+  geom_line()  + scale_y_log10() +
+  labs(x = 'Date', y = "Closing prices")
+```
+## Correlations 
+Creating a heatmap of the correlations before 2018-01-01. 
+```{r fig.height=10, fig.width=10}
+data %>%
+  filter(Date < "2018-01-01") %>%
+  select(-Date) %>%
+  GGally::ggcorr(label = TRUE, 
+                 label_size = 5, 
+                 label_round = 3, 
+                 label_alpha = TRUE)
+```
+The heatmap shows the most stocks have a positive correlation with each other except *FLSmidth* and *OilPrice*. Several stocks have a very high correlation above 0.90, e.g. *MaerskA* and *MaerskB*, *Lundbeck* and *Genmab*, and *NovoNordisk* and *Novozymes*.
+
+# Choosing the dependent variables
+When choosing which variables to forecast, this study has chosen to use the biggest stock from each sector. Plotting the value of the stock 2018-01-02 for each sector.
+```{r}
+total_data %>%
+  filter(Date == "2018-01-02") %>%
+  filter(Company != "OilPrice"&Company != "USD/DKK") %>%
+  mutate(Value = Value %>% round(2)) %>%
+  arrange(desc(Value)) %>%
+  mutate(Sector = ifelse(Company == "Tryg"|Company == "JyskeBank"| Company == "Nordea"| Company == "DanskeBank", "Finance", 
+                  ifelse(Company == "Baverian"| Company == "Coloplast" | Company == "Demant"|Company == "Genmab"| Company == "GN"| Company == "Lundbeck"|Company == "NovoNordisk"| Company == "Novozymes"| Company == "WilliamDemant", "Health Care", 
+                  ifelse(Company == "DSV"| Company == "FLSmidth"| Company == "MaerskA" | Company == "MaerskB"|Company == "NKT", "Industry",       
+                  ifelse(Company == "Carlsberg","Consumption",
+                  ifelse(Company == "Vestas", "Energy","test"))))))%>%
+  arrange(desc(Sector,Value)) %>% select(-Date) 
+```
+For Industry, MaerskB is chosen, for Health Care Genmab is chosen, for Finance Jyske Bank is chosen, for Energy Vestas is chosen, and finally, for Consumption Carlsberg is chosen.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(total_data)
+```
+
+# Industy - Mærsk B
+## Selection of features
+This study has chosen two versions of each stock - one only depending on its pasts value and one depending on its pasts value and different features. These features are chosen based on a granger causality test. Calculating granger causality for each value and *MaarskB*. Five lags each chosen for this study.
+```{r}
+Order_lags <- 5
+DependendVariable <- data$MaerskB
+ 
+GC1 <- grangertest(DependendVariable ~MaerskA,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC2 <- grangertest(DependendVariable ~ Baverian,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Baverian") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Baverian))
+
+GC3 <- grangertest(DependendVariable ~ Carlsberg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Carlsberg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Carlsberg))
+
+GC4 <- grangertest(DependendVariable ~ Coloplast,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Coloplast") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Coloplast))
+
+GC5 <- grangertest(DependendVariable ~ DanskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DanskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DanskeBank))
+
+GC6 <- grangertest(DependendVariable ~ DSV,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DSV") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DSV))
+
+GC7 <- grangertest(DependendVariable ~ FLSmidth,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "FLSmidth") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$FLSmidth))
+
+GC8 <- grangertest(DependendVariable ~ Genmab,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Genmab") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Genmab))
+
+GC9 <- grangertest(DependendVariable ~ GN,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "GN") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$GN))
+
+GC10 <- grangertest(DependendVariable ~ JyskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "JyskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$JyskeBank))
+
+GC11 <- grangertest(DependendVariable ~ Lundbeck,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Lundbeck") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Lundbeck))
+
+GC12 <- grangertest(DependendVariable ~ NKT,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NKT") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$NKT))
+
+GC13 <- grangertest(DependendVariable ~ Nordea,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Nordea") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Nordea))
+
+GC14 <- grangertest(DependendVariable ~ NovoNordisk,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NovoNordisk") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$NovoNordisk))
+
+GC15 <- grangertest(DependendVariable ~ Novozymes,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Novozymes") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Novozymes))
+
+GC16 <- grangertest(DependendVariable ~ Tryg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Tryg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Tryg))
+
+GC17 <- grangertest(DependendVariable ~ Vestas,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Vestas") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Vestas))
+
+GC18 <- grangertest(DependendVariable ~ WilliamDemant,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "WilliamDemant") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$WilliamDemant))
+
+GC19 <- grangertest(DependendVariable ~ OilPrice,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "OilPrice") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$OilPrice))
+
+GC20 <- grangertest(DependendVariable ~ `USD/DKK`,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "USD/DKK") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$`USD/DKK`))
+
+GC_MaerskB <- rbind(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20) %>% as.data.frame()
+```
+A feature is chosen to be significant if the value is equal to 0.1 or less. 
+```{r}
+GC_MaerskB %>%
+    filter(GrangerCausitality <= 0.1)
+```
+For *MaerskB* the features *FLSmidth*, *Genmab*, *NovoNordisk*, and *OilPrice* is chosen. Furthermore, *Date* and the dependent value *MaerskB* is chosen. These variables is selected including *Date* and the dependent value *MaerskB is chosen.
+```{r}
+data_MaerskB <- data %>%
+  select(Date, MaerskB, FLSmidth, Genmab, NovoNordisk, OilPrice)
+```
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20,GC_MaerskB,DependendVariable,Order_lags)
+```
+
+## Investergation the new data set
+Plotting each variable individually. STOP
+```{r}
+Plot1 <-  data_MaerskB  %>% ggplot(aes(y = MaerskB, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="", x = "Maersk B")
+
+Plot2 <-  data_MaerskB  %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_line( col = "deepskyblue3") + theme(legend.position = "none") + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB %>% ggplot(aes(y = Genmab, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Genmab")
+
+Plot4 <-  data_MaerskB %>%   ggplot(aes(y = NovoNordisk, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB %>% ggplot(aes(y = OilPrice, x = Date)) + geom_line(col = "darkgreen") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("The dependent variable (red) and its features", size = 15))
+```
+### Boxplot
+Creating a summary in order to investigate each variable.
+```{r}
+data_MaerskB %>%  select(-Date) %>%
+  summary()
+```
+Besides *MaerskB*, *Genmab* has both the lowest and highest value.  
+
+Creating a box plot for each variable. (I created two boxplot because I am not sure which one to pick).
+```{r}
+Plot1 <-  data_MaerskB %>% ggplot(aes(y = MaerskB, x = Date,  col= "red") ) +   geom_boxplot()  + theme(legend.position = "none") + labs(y="", x = "Maersk B")
+
+Plot2 <-  data_MaerskB%>% ggplot(aes(y = FLSmidth, x = Date)) + geom_boxplot(col= "deepskyblue3") + theme(legend.position = "none") + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB  %>% ggplot(aes(y = Genmab, x = Date)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Genmab")
+
+Plot4 <-  data_MaerskB %>%ggplot(aes(y = NovoNordisk, x = Date)) + geom_boxplot( col = "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB %>% ggplot(aes(y = OilPrice, x = Date)) + geom_boxplot(col = "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Boxplot for the dependent variable (red) and its features", size = 15))
+```
+When plotting the date by using the *gather* function, the stocks is plotted in alphabetic order. To get the same order as the other plots, the plots is recorded into a number and a factor, then the number is given a level, and then given a number is given a label corresponding the name of the company.
+```{r}
+data_MaerskB_plot<- gather(data_MaerskB, Company, Value, -Date)
+data_MaerskB_plot %<>% mutate(Company = ifelse(Company == "MaerskB", 1, 
+                           ifelse(Company == "FLSmidth", 2,
+                           ifelse(Company == "Genmab", 3, 
+                           ifelse(Company == "NovoNordisk", 4, 
+                           ifelse(Company == "OilPrice", 5, "test")))))) 
+data_MaerskB_plot$Company <- factor(as.numeric(data_MaerskB_plot$Company), 
+          levels = c(1, 2, 3, 4, 5), 
+          labels = c("MaerskB","FLSmidth", "Genmab", "NovoNordisk","OilPrice"))
+```
+
+The second box plot.
+```{r}
+data_MaerskB_plot%>%
+ggplot( aes(x=Company, y=Value)) + geom_boxplot(col = c("coral", "deepskyblue3", "skyblue", "darkolivegreen4","darkgreen"))+ scale_y_log10()  + labs(y="", x = "Company")
+```
+
+A yearly boxplot is made for each variable. This shows if the rise/fall the stock did a year were distributed on a few observation or were more consistent. 
+```{r}
+Plot1 <- data_MaerskB %>% select(Date, MaerskB) %>%mutate(Year = format(Date, "%Y" )) %>%  ggplot(aes(x=Year, y=MaerskB)) + geom_boxplot(col = "coral")+ theme(legend.position = "none") + labs(y="", x = "Maersk B")
+
+Plot2 <-  data_MaerskB%>% select(Date,FLSmidth) %>%mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(x = Year, y = FLSmidth)) + geom_boxplot( col = "deepskyblue3") + theme(legend.position = "none") + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB  %>% select(Date, Genmab) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Genmab)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Genmab")
+
+Plot4 <-  data_MaerskB %>%select(Date, NovoNordisk) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = NovoNordisk)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB %>%select(Date, OilPrice) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = OilPrice)) + geom_boxplot(col = "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Yearly box plot for the dependent variable (red) and its features", size = 15))
+```
+### Density plot
+Plotting a density plot and the mean for each variable. 
+```{r}
+Plot1 <-  data_MaerskB %>% ggplot(aes(x = MaerskB, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(MaerskB)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Maersk B")
+
+Plot2 <-  data_MaerskB%>% ggplot(aes(x = FLSmidth)) + geom_density( col = "deepskyblue3") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB  %>% ggplot(aes(x = Genmab)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Genmab)),
+            color="darkgrey", linetype="dashed", size=1)  + labs(y="", x = "Genmab")
+
+Plot4 <-  data_MaerskB %>%ggplot(aes(x = NovoNordisk)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(NovoNordisk)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB %>% ggplot(aes(x = OilPrice)) + geom_density(col = "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(OilPrice)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dashed line is the mean of each variable", size = 10))
+```
+
+## The change in stock
+Creating a new data set for change in price in per cent. 
+```{r}
+data_MaerskB_Change <- data_MaerskB %>%
+  mutate(MaerskB  = ((MaerskB-lag(MaerskB))/lag(MaerskB))*100,
+         FLSmidth = ((FLSmidth-lag(FLSmidth))/lag(FLSmidth))*100,
+         Genmab = ((Genmab-lag(Genmab))/lag(Genmab))*100,
+         NovoNordisk = ((NovoNordisk-lag(NovoNordisk))/lag(NovoNordisk))*100,
+         OilPrice = ((OilPrice-lag(OilPrice))/lag(OilPrice))*100) %>%
+         drop_na()
+```
+
+Plotting the change in per cent for each variable individually. This shows how volatile each variable is. 
+```{r}
+Plot1 <-  data_MaerskB_Change  %>%ggplot(aes(y = MaerskB, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none") + labs(y = "", x = "Maersk B")
+
+Plot2 <-  data_MaerskB_Change  %>%  ggplot(aes(y = FLSmidth, x = Date)) + geom_line( col = "deepskyblue3") + theme(legend.position = "none") + labs(y = "", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB_Change  %>% ggplot(aes(y = Genmab, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none")+ labs(y = "", x = "Genmab")
+
+Plot4 <-  data_MaerskB_Change  %>% ggplot(aes(y = NovoNordisk, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y = "" ,x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB_Change  %>% ggplot(aes(y = OilPrice, x = Date)) + geom_line(col = "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Change in percent for the dependent variable (red) and its features", size = 15))
+```
+*Genmab* has by far the highest change in price in a day with 45 per cent. 
+
+Plotting the distribition for each variable
+```{r}
+Plot1 <- data_MaerskB_Change %>%ggplot(aes(x = MaerskB, col= "red") )  +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(MaerskB)),color="darkgrey", linetype="dashed", size=1)+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.35))  + labs(y = "", x = "Maersk B")
+
+Plot2 <-  data_MaerskB_Change  %>% ggplot(aes(x = FLSmidth)) + geom_density(col = "deepskyblue3") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)), color="darkgrey", linetype="dashed", size=1)+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.35)) + labs(y = "", x = " FLSmidth")
+
+Plot3 <-  data_MaerskB_Change  %>% ggplot(aes(x = Genmab)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Genmab)),
+            color="darkgrey", linetype="dashed", size=1)+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.35)) + labs(y = "", x = "Genmab")
+
+Plot4 <-  data_MaerskB_Change %>%ggplot(aes(x = NovoNordisk)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(NovoNordisk)),
+            color="darkgrey", linetype="dashed", size=1) + scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.35))  + labs(y = "" ,x = " Novo Nordisk")
+  
+Plot5 <-  data_MaerskB_Change  %>% ggplot(aes(x = OilPrice)) + geom_density(col = "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(OilPrice)),
+            color="darkgrey", linetype="dashed", size=1) + scale_x_continuous(limits = c(-5,5)) + scale_y_continuous(limits = c(0,0.35)) + labs(y="", x = "Oil Price")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dash line is the mean of each feature", size = 10))
+```
+All of the variable seems to have a normal distribution. Both *Genmab* and *NovoNordisk* seems to have a higher mean than the rest.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(Plot1, Plot_Baverian, Plot2, Plot3, Plot4, Plot5, Plot_Collected, data_MaerskB_plot, data_MaerskB_Change)
+```
+
+## Saving the data set
+The Mærsk B data set is now done and ready for forecast. It is saved as a cvs-file and uploaded on [Github](https://github.com/andreasbj77/Master-thesis?fbclid=IwAR1-uXAsXOvRxWwDzpfhzjiqyOhil9E4wklrK03_fRMZhLQ7EYTrooHzTw0)
+```{r}
+setwd("~/Desktop")
+write_as_csv(data_MaerskB,"DataCreationMaerskB.csv")
+```
+
+```{r}
+rm(data_MaerskB)
+```
+
+
+
+# Health Care - Genmab
+## Selection of features
+Calculating granger causality for each value and *Genmab*. Five lags each chosen for this study.
+```{r}
+Order_lags <- 5
+DependendVariable <- data$Genmab
+ 
+GC1 <- grangertest(DependendVariable ~MaerskA,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC2 <- grangertest(DependendVariable ~MaerskB,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC3 <- grangertest(DependendVariable ~ Baverian,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Baverian") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Baverian))
+
+GC4 <- grangertest(DependendVariable ~ Carlsberg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Carlsberg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Carlsberg))
+
+GC5 <- grangertest(DependendVariable ~ Coloplast,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Coloplast") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Coloplast))
+
+GC6 <- grangertest(DependendVariable ~ DanskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DanskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DanskeBank))
+
+GC7 <- grangertest(DependendVariable ~ DSV,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DSV") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DSV))
+
+GC8 <- grangertest(DependendVariable ~ FLSmidth,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "FLSmidth") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$FLSmidth))
+
+GC9 <- grangertest(DependendVariable ~ GN,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "GN") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$GN))
+
+GC10 <- grangertest(DependendVariable ~ JyskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "JyskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$JyskeBank))
+
+GC11 <- grangertest(DependendVariable ~ Lundbeck,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Lundbeck") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Lundbeck))
+
+GC12 <- grangertest(DependendVariable ~ NKT,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NKT") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$NKT))
+
+GC13 <- grangertest(DependendVariable ~ Nordea,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Nordea") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Nordea))
+
+GC14 <- grangertest(DependendVariable ~ NovoNordisk,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NovoNordisk") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$NovoNordisk))
+
+GC15 <- grangertest(DependendVariable ~ Novozymes,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Novozymes") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Novozymes))
+
+GC16 <- grangertest(DependendVariable ~ Tryg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Tryg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Tryg))
+
+GC17 <- grangertest(DependendVariable ~ Vestas,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Vestas") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Vestas))
+
+GC18 <- grangertest(DependendVariable ~ WilliamDemant,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "WilliamDemant") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$WilliamDemant))
+
+GC19 <- grangertest(DependendVariable ~ OilPrice,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "OilPrice") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$OilPrice))
+
+GC20 <- grangertest(DependendVariable ~ `USD/DKK`,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "USD/DKK") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$`USD/DKK`))
+
+GC_Genmab <- rbind(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20) %>% as.data.frame()
+```
+The significant features is chosen.
+```{r}
+GC_Genmab %>%
+    filter(GrangerCausitality <= 0.1)
+```
+For *Genmab* the features *FLSmidth*, *Lundbeck*, *Tryg*, *WilliamDemant*, *OilPrice* and *USD/DKK* is chosen. These variables is selected including *Date* and the dependent value *Genmab* is chosen.
+```{r}
+data_Genmab <- data %>%
+  select(Date, Genmab, FLSmidth, Lundbeck, Tryg, WilliamDemant, OilPrice, `USD/DKK`)
+```
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20,GC_Genmab,DependendVariable,Order_lags)
+```
+
+## Investegating 
+Plotting each variable individually. 
+```{r}
+Plot1 <-  data_Genmab  %>% ggplot(aes(y = Genmab, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Genmab")
+
+Plot2 <-  data_Genmab  %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " FLSmidth")
+
+Plot3 <-  data_Genmab %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Lundbeck")
+
+Plot4 <-  data_Genmab %>%   ggplot(aes(y = Tryg, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Tryg")
+  
+Plot5 <-  data_Genmab %>%   ggplot(aes(y = WilliamDemant, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " WilliamDemant")
+  
+Plot6 <-  data_Genmab %>% ggplot(aes(y = OilPrice, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Genmab %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)
+annotate_figure(Plot_Collected, top = text_grob("The dependent variable (red) and its features", size = 15))
+```
+### Boxplot
+Creating a summary in order to investigate each variable.
+```{r}
+data_Genmab %>% select(-Date) %>%  summary() 
+```
+Besides *Genmab*, *Genmab* has both the lowest and highest value.  
+
+Creating a box plot for each variable. (I created two boxplot because I am not sure which one to pick).
+```{r}
+Plot1 <-  data_Genmab %>% ggplot(aes(y = Genmab, x = Date,  col= "red") ) +   geom_boxplot()  + theme(legend.position = "none") + labs(y="" ,x = "Genmab")
+
+Plot2 <-  data_Genmab%>% ggplot(aes(y = FLSmidth, x = Date)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_Genmab  %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "Lundbeck")
+
+Plot4 <-  data_Genmab %>%ggplot(aes(y = Tryg, x = Date)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Tryg")
+  
+Plot5 <-  data_Genmab %>% ggplot(aes(y = WilliamDemant, x = Date)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "William Demant")
+  
+Plot6 <-  data_Genmab %>% ggplot(aes(y = OilPrice, x = Date)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <- data_Genmab %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)
+annotate_figure(Plot_Collected, top = text_grob("Boxplot for the dependent variable (red) and its features", size = 15))
+```
+When plotting the date by using the *gather* function, the stocks is plotted in alphabetic order. To get the same order as the other plots, the plots is recorded into a number and a factor, then the number is given a level, and then given a number is given a label corresponding the name of the company.
+```{r}
+data_Genmab_plot<- gather(data_Genmab, Company, Value, -Date)
+data_Genmab_plot %<>% mutate(Company = ifelse(Company == "Genmab", 1, 
+                           ifelse(Company == "FLSmidth", 2,
+                           ifelse(Company == "Lundbeck", 3, 
+                           ifelse(Company == "Tryg", 4, 
+                           ifelse(Company == "WilliamDemant", 5,
+                           ifelse(Company == "OilPrice", 6,
+                           ifelse(Company == "USD/DKK", 7, "test"))))))))
+data_Genmab_plot$Company <- factor(as.numeric(data_Genmab_plot$Company), 
+          levels = c(1, 2, 3, 4, 5, 6, 7), 
+          labels = c("Genmab", "FLSmidth", "Lundbeck", "Tryg", "William Demant", "OilPrice", "USD/DKK"))
+```
+
+The second box plot.
+```{r fig.height=5, fig.width=6}
+data_Genmab_plot%>%
+ggplot( aes(x=Company, y=Value)) + geom_boxplot(col = c("coral", "cornflowerblue", "skyblue","darkgreen", "darkolivegreen4", "deepskyblue4", "deepskyblue3"))+ scale_y_log10()  + labs(y="", x = "Company")
+```
+
+A yearly boxplot is made for each variable. This shows if the rise/fall the stock did a year were distributed on a few observation or were more consistent. 
+```{r}
+Plot1 <- data_Genmab %>% select(Date, Genmab) %>%mutate(Year = format(Date, "%Y" )) %>%  ggplot(aes(x=Year, y=Genmab)) + geom_boxplot(col = "coral")+ theme(legend.position = "none") + labs(y="" ,x = "Genmab")
+
+Plot2 <-  data_Genmab%>% select(Date,FLSmidth) %>%mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(x = Year, y = FLSmidth)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_Genmab  %>% select(Date, Lundbeck) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Lundbeck)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "Lundbeck")
+
+Plot4 <-  data_Genmab %>%select(Date, Tryg) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Tryg)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Tryg")
+  
+Plot5 <-  data_Genmab %>%select(Date, WilliamDemant) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = WilliamDemant)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "Oil Price")   
+
+Plot6 <-  data_Genmab%>%select(Date, OilPrice) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = OilPrice)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Genmab%>%select(Date, `USD/DKK`) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y =`USD/DKK`)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Yearly box plot for the dependent variable (red) and its features", size = 15))
+```
+### Density plot
+Plotting a density plot and the mean for each variable. 
+```{r}
+Plot1 <-  data_Genmab %>% ggplot(aes(x = Genmab, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Genmab)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Genmab")
+
+Plot2 <-  data_Genmab%>% ggplot(aes(x = FLSmidth)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " FLSmidth")
+
+Plot3 <-  data_Genmab  %>% ggplot(aes(x = Lundbeck)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Lundbeck)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "Lundbeck")
+
+Plot4 <-  data_Genmab %>%ggplot(aes(x = Tryg)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Tryg")
+  
+Plot5 <-  data_Genmab %>% ggplot(aes(x = WilliamDemant)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(WilliamDemant)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "William Demant")
+
+Plot6 <-  data_Genmab %>% ggplot(aes(x = OilPrice)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") +geom_vline(aes(xintercept=mean(OilPrice)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Genmab %>% ggplot(aes(x =`USD/DKK`)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(`USD/DKK`)),
+            color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dashed line is the mean of each variable", size = 10))
+```
+
+## The change in stock
+Creating a new data set for change in price in per cent. 
+```{r}
+data_Genmab_Change <- data_Genmab %>%
+  mutate(Genmab  = ((Genmab-lag(Genmab))/lag(Genmab))*100,
+         FLSmidth = ((FLSmidth-lag(FLSmidth))/lag(FLSmidth))*100,
+         Lundbeck = ((Lundbeck-lag(Lundbeck))/lag(Lundbeck))*100,
+         Tryg = ((Tryg-lag(Tryg))/lag(Tryg))*100,
+         WilliamDemant = ((WilliamDemant-lag(WilliamDemant))/lag(WilliamDemant))*100,
+         OilPrice = ((OilPrice-lag(OilPrice))/lag(OilPrice))*100,
+         `USD/DKK` = ((`USD/DKK`-lag(`USD/DKK`))/lag(`USD/DKK`))*100) %>%
+         drop_na()
+```
+
+Plotting the change in per cent for each variable individually. This shows how volatile each variable is. 
+```{r}
+Plot1 <-  data_Genmab_Change  %>% ggplot(aes(y = Genmab, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Genmab")
+
+Plot2 <-  data_Genmab_Change  %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " FLSmidth")
+
+Plot3 <-  data_Genmab_Change %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Lundbeck")
+
+Plot4 <-  data_Genmab_Change %>%   ggplot(aes(y = Tryg, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Tryg")
+  
+Plot5 <-  data_Genmab_Change %>%   ggplot(aes(y = WilliamDemant, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " WilliamDemant")
+  
+Plot6 <-  data_Genmab_Change %>% ggplot(aes(y = OilPrice, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Genmab_Change %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Change in percent for the dependent variable (red) and its features", size = 15))
+```
+*Genmab* has by far the highest change in price in a day with 45 per cent. 
+### Density plot
+Plotting the distribition for each variable
+```{r}
+Plot1 <-  data_Genmab_Change %>% ggplot(aes(x = Genmab, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Genmab)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Genmab") + scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot2 <-  data_Genmab_Change%>% ggplot(aes(x = FLSmidth)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " FLSmidth")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+
+Plot3 <-  data_Genmab_Change  %>% ggplot(aes(x = Lundbeck)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Lundbeck)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "Lundbeck")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+
+Plot4 <-  data_Genmab_Change %>%ggplot(aes(x = Tryg)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Tryg")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+  
+Plot5 <-  data_Genmab_Change %>% ggplot(aes(x = WilliamDemant)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(WilliamDemant)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "William Demant")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+
+Plot6 <-  data_Genmab_Change %>% ggplot(aes(x = OilPrice)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") +geom_vline(aes(xintercept=mean(OilPrice)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Oil Price")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+ 
+Plot7 <-  data_Genmab_Change %>% ggplot(aes(x =`USD/DKK`)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(`USD/DKK`)),
+            color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dash line is the mean of each feature", size = 10))
+```
+All of the variable seems to have a normal distribution. Both *Genmab* and *NovoNordisk* seems to have a higher mean than the rest.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(Plot1, Plot_Baverian, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot_Collected, data_Genmab_plot, data_Genmab_Change)
+```
+## Saving the data set
+The Genmab data set is now done and ready for forecast. It is saved as a cvs-file and uploaded on [Github](https://github.com/andreasbj77/Master-thesis?fbclid=IwAR1-uXAsXOvRxWwDzpfhzjiqyOhil9E4wklrK03_fRMZhLQ7EYTrooHzTw0)
+```{r}
+setwd("~/Desktop")
+write_as_csv(data_Genmab,"DataCreationGenmab.csv")
+```
+
+```{r}
+rm(data_Genmab)
+```
+
+# Finance - Jyske Bank
+## Selection of features
+Calculating granger causality for each value and *JyskeBank*. Five lags each chosen for this study.
+```{r}
+Order_lags <- 5
+DependendVariable <- data$JyskeBank
+ 
+GC1 <- grangertest(DependendVariable ~MaerskA,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC2 <- grangertest(DependendVariable ~MaerskB,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC3 <- grangertest(DependendVariable ~ Baverian,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Baverian") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Baverian))
+
+GC4 <- grangertest(DependendVariable ~ Carlsberg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Carlsberg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Carlsberg))
+
+GC5 <- grangertest(DependendVariable ~ Coloplast,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Coloplast") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Coloplast))
+
+GC6 <- grangertest(DependendVariable ~ DanskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DanskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DanskeBank))
+
+GC7 <- grangertest(DependendVariable ~ DSV,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DSV") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DSV))
+
+GC8 <- grangertest(DependendVariable ~ FLSmidth,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "FLSmidth") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$FLSmidth))
+
+GC9 <- grangertest(DependendVariable ~ Genmab,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Genmab") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Genmab))
+
+GC10 <- grangertest(DependendVariable ~ GN,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "GN") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$GN))
+
+GC11 <- grangertest(DependendVariable ~ Lundbeck,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Lundbeck") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Lundbeck))
+
+GC12 <- grangertest(DependendVariable ~ NKT,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NKT") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$NKT))
+
+GC13 <- grangertest(DependendVariable ~ Nordea,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Nordea") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Nordea))
+
+GC14 <- grangertest(DependendVariable ~ NovoNordisk,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NovoNordisk") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$NovoNordisk))
+
+GC15 <- grangertest(DependendVariable ~ Novozymes,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Novozymes") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Novozymes))
+
+GC16 <- grangertest(DependendVariable ~ Tryg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Tryg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Tryg))
+
+GC17 <- grangertest(DependendVariable ~ Vestas,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Vestas") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Vestas))
+
+GC18 <- grangertest(DependendVariable ~ WilliamDemant,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "WilliamDemant") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$WilliamDemant))
+
+GC19 <- grangertest(DependendVariable ~ OilPrice,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "OilPrice") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$OilPrice))
+
+GC20 <- grangertest(DependendVariable ~ `USD/DKK`,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "USD/DKK") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$`USD/DKK`))
+
+GC_JyskeBank <- rbind(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20) %>% as.data.frame()
+```
+The significant features is chosen.
+```{r}
+GC_JyskeBank %>%
+    filter(GrangerCausitality <= 0.1)
+```
+For *JyskeBank* the features, *Lundbeck*, *NKT*, *Nordea*, *Tryg*, and *USD/DKK* is chosen. These variables is selected including *Date* and the dependent value *JyskeBank* is chosen.
+```{r}
+data_JyskeBank <- data %>%
+  select(Date, JyskeBank, Lundbeck, NKT, Nordea, Tryg, `USD/DKK`)
+```
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20,GC_JyskeBank,DependendVariable,Order_lags)
+```
+The significant features is chosen.
+
+## Investegating 
+Plotting each variable individually. 
+```{r}
+Plot1 <-  data_JyskeBank  %>% ggplot(aes(y = JyskeBank, x = Date,  col= "red")) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Jyske Bank")
+
+Plot2 <-  data_JyskeBank  %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = "Lundbeck")
+
+Plot3 <-  data_JyskeBank %>% ggplot(aes(y = NKT, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "NKT")
+
+Plot4 <-  data_JyskeBank %>%   ggplot(aes(y = Nordea, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Nordea")
+  
+Plot5 <-  data_JyskeBank %>%   ggplot(aes(y = Tryg, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "Tryg")
+ 
+Plot6 <-  data_JyskeBank %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)
+annotate_figure(Plot_Collected, top = text_grob("The dependent variable (red) and its features", size = 15))
+```
+### Boxplot
+Creating a summary in order to investigate each variable.
+```{r}
+data_JyskeBank %>% select(-Date) %>%  summary() 
+```
+Besides *Genmab*, *Genmab* has both the lowest and highest value.  
+
+Creating a box plot for each variable. (I created two boxplot because I am not sure which one to pick).
+```{r}
+Plot1 <-  data_JyskeBank %>%ggplot(aes(y = JyskeBank, x = Date,  col= "red")) +   geom_boxplot()  + theme(legend.position = "none") + labs(y="" ,x = "Jyske Bank")
+
+Plot2 <-  data_JyskeBank%>% ggplot(aes(y = Lundbeck, x = Date)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = "Lundbeck")
+
+Plot3 <-  data_JyskeBank  %>% ggplot(aes(y = NKT, x = Date)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "NKT")
+
+Plot4 <-  data_JyskeBank %>%ggplot(aes(y = Nordea, x = Date)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Nordea")
+  
+Plot5 <-  data_JyskeBank %>% ggplot(aes(y = Tryg, x = Date)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "Tryg")
+ 
+Plot6 <- data_JyskeBank %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)
+annotate_figure(Plot_Collected, top = text_grob("Boxplot for the dependent variable (red) and its features", size = 15))
+```
+When plotting the date by using the *gather* function, the stocks is plotted in alphabetic order. To get the same order as the other plots, the plots is recorded into a number and a factor, then the number is given a level, and then given a number is given a label corresponding the name of the company.
+```{r}
+data_JyskeBank_plot<- gather(data_JyskeBank, Company, Value, -Date)
+data_JyskeBank_plot %<>% mutate(Company = ifelse(Company == "JyskeBank", 1, 
+                           ifelse(Company == "Lundbeck", 2,
+                           ifelse(Company == "NKT", 3, 
+                           ifelse(Company == "Nordea", 4, 
+                           ifelse(Company == "Tryg", 5, 
+                           ifelse(Company == "USD/DKK", 6, "test"))))))) 
+data_JyskeBank_plot$Company <- factor(as.numeric(data_JyskeBank_plot$Company), 
+          levels = c(1, 2, 3, 4, 5, 6), 
+          labels = c("JyskeBank", "Lundbeck","NKT", "Nordea", "Tryg", "USD/DKK"))
+```
+
+The second box plot.
+```{r fig.height=5, fig.width=6}
+data_JyskeBank_plot %>% ggplot( aes(x=Company, y=Value)) + geom_boxplot(col = c("coral", "cornflowerblue", "skyblue","darkgreen", "darkolivegreen4", "deepskyblue4"))+ scale_y_log10()  + labs(y="", x = "Company")
+```
+
+A yearly boxplot is made for each variable. This shows if the rise/fall the stock did a year were distributed on a few observation or were more consistent. 
+```{r}
+Plot1 <- data_JyskeBank %>% select(Date, JyskeBank) %>%mutate(Year = format(Date, "%Y" )) %>%  ggplot(aes(x=Year, y=JyskeBank)) + geom_boxplot(col = "coral")+ theme(legend.position = "none") + labs(y="" ,x = "Jyske Bank")
+
+Plot2 <-  data_JyskeBank%>% select(Date,Lundbeck) %>% mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(x = Year, y = Lundbeck)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = "Lundbeck")
+
+Plot3 <-  data_JyskeBank  %>% select(Date, NKT) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = NKT)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "NKT")
+
+Plot4 <-  data_JyskeBank %>% select(Date, Nordea) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Nordea)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Nordea")
+  
+Plot5 <-  data_JyskeBank %>%select(Date, Tryg) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Tryg)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Tryg") 
+
+Plot6 <-  data_JyskeBank%>%select(Date, `USD/DKK`) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y =`USD/DKK`)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)
+annotate_figure(Plot_Collected, top = text_grob("Yearly box plot for the dependent variable (red) and its features", size = 15))
+```
+### Density plot
+Plotting a density plot and the mean for each variable. 
+```{r}
+Plot1 <-  data_JyskeBank %>% ggplot(aes(x = JyskeBank, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(JyskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Jyske Bank")
+
+Plot2 <-  data_JyskeBank%>% ggplot(aes(x = Lundbeck)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(Lundbeck)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y= "", x = "Lundbeck")
+
+Plot3 <-  data_JyskeBank  %>% ggplot(aes(x = NKT)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(NKT)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "NKT")
+
+Plot4 <-  data_JyskeBank %>%ggplot(aes(x = Nordea)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Nordea)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Nordea")
+  
+Plot5 <-  data_JyskeBank %>% ggplot(aes(x = Tryg)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Tryg")
+ 
+Plot6 <-  data_JyskeBank %>% ggplot(aes(x =`USD/DKK`)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(`USD/DKK`)),
+            color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dashed line is the mean of each variable", size = 10))
+```
+
+## The change in stock
+Creating a new data set for change in price in per cent. 
+```{r}
+data_JyskeBank_Change <- data_JyskeBank %>%
+  mutate(JyskeBank  = ((JyskeBank-lag(JyskeBank))/lag(JyskeBank))*100,
+         Lundbeck = ((Lundbeck-lag(Lundbeck))/lag(Lundbeck))*100,
+         NKT = ((NKT-lag(NKT))/lag(NKT))*100,
+         Nordea = ((  Nordea-lag(  Nordea))/lag(Nordea))*100,
+         Tryg = ((Tryg-lag(Tryg))/lag(Tryg))*100,
+         `USD/DKK` = ((`USD/DKK`-lag(`USD/DKK`))/lag(`USD/DKK`))*100) %>%
+         drop_na()
+```
+
+Plotting the change in per cent for each variable individually. This shows how volatile each variable is. 
+```{r}
+Plot1 <-  data_JyskeBank_Change  %>%ggplot(aes(y = JyskeBank, x = Date,  col= "red")) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Jyske Bank")
+
+Plot2 <-  data_JyskeBank_Change  %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = "Lundbeck")
+
+Plot3 <-  data_JyskeBank_Change %>% ggplot(aes(y = NKT, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "NKT")
+
+Plot4 <-  data_JyskeBank_Change %>%   ggplot(aes(y = Nordea, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = "Nordea")
+  
+Plot5 <-  data_JyskeBank_Change %>%   ggplot(aes(y = Tryg, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Tryg")
+  
+Plot6 <-  data_JyskeBank_Change %>% ggplot(aes(y =`USD/DKK`, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=4, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)
+annotate_figure(Plot_Collected, top = text_grob("Change in percent for the dependent variable (red) and its features", size = 15))
+```
+*Lundbeck* and *NKT* has by far the highest change in price in a day with 45 per cent. 
+### Density plot
+Plotting the distribition for each variable
+```{r}
+Plot1 <-  data_JyskeBank_Change %>% ggplot(aes(x = JyskeBank, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(JyskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Jyske Bank") + scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot2 <-  data_JyskeBank_Change%>% ggplot(aes(x = Lundbeck)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(Lundbeck)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Lundbeck")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot3 <-  data_JyskeBank_Change  %>% ggplot(aes(x = NKT)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(NKT)),
+            color="darkgrey", linetype="dashed", size=1)  + labs(y="", x = "NKT")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot4 <-  data_JyskeBank_Change %>%ggplot(aes(x = Nordea)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Nordea)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Nordea") + scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot5 <-  data_JyskeBank_Change %>% ggplot(aes(x = Tryg)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1)+ labs(y="", x = " Tryg")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot6 <-  data_JyskeBank_Change %>% ggplot(aes(x =`USD/DKK`)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(`USD/DKK`)),
+            color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "USD/DKK")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, ncol = 2, nrow = 3)
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dash line is the mean of each feature", size = 10))
+```
+All of the variable seems to have a normal distribution. Both *Lundbeck* and *Tryg* seems to have a higher mean than the rest.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(Plot1, Plot_Baverian, Plot2, Plot3, Plot4, Plot5, Plot6, Plot_Collected, data_JyskeBank_plot, data_JyskeBank_Change)
+```
+
+
+## Saving the data set
+The Jyske Bank data set is now done and ready for forecast. It is saved as a cvs-file and uploaded on [Github](https://github.com/andreasbj77/Master-thesis?fbclid=IwAR1-uXAsXOvRxWwDzpfhzjiqyOhil9E4wklrK03_fRMZhLQ7EYTrooHzTw0)
+```{r}
+setwd("~/Desktop")
+write_as_csv(data_JyskeBank,"DataCreationJyskeBank.csv")
+```
+
+```{r}
+rm(data_JyskeBank)
+```
+
+# Finance - Vestas
+## Selection of features
+Calculating granger causality for each value and *Vestas*. Five lags each chosen for this study.
+```{r}
+Order_lags <- 5
+DependendVariable <- data$Vestas
+ 
+GC1 <- grangertest(DependendVariable ~MaerskA,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC2 <- grangertest(DependendVariable ~MaerskB,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskB") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC3 <- grangertest(DependendVariable ~ Baverian,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Baverian") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Baverian))
+
+GC4 <- grangertest(DependendVariable ~ Carlsberg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Carlsberg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Carlsberg))
+
+GC5 <- grangertest(DependendVariable ~ Coloplast,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Coloplast") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Coloplast))
+
+GC6 <- grangertest(DependendVariable ~ DanskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DanskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DanskeBank))
+
+GC7 <- grangertest(DependendVariable ~ DSV,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DSV") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DSV))
+
+GC8 <- grangertest(DependendVariable ~ FLSmidth,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "FLSmidth") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$FLSmidth))
+
+GC9 <- grangertest(DependendVariable ~ Genmab,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Genmab") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Genmab))
+
+GC10 <- grangertest(DependendVariable ~ GN,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "GN") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$GN))
+
+GC11 <- grangertest(DependendVariable ~ JyskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "JyskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$JyskeBank))
+
+GC12 <- grangertest(DependendVariable ~ Lundbeck,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Lundbeck") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Lundbeck))
+
+GC13 <- grangertest(DependendVariable ~ NKT,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NKT") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$NKT))
+
+GC14 <- grangertest(DependendVariable ~ Nordea,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Nordea") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Nordea))
+
+GC15 <- grangertest(DependendVariable ~ NovoNordisk,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NovoNordisk") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$NovoNordisk))
+
+GC16 <- grangertest(DependendVariable ~ Novozymes,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Novozymes") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Novozymes))
+
+GC17 <- grangertest(DependendVariable ~ Tryg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Tryg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Tryg))
+
+GC18 <- grangertest(DependendVariable ~ WilliamDemant,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "WilliamDemant") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$WilliamDemant))
+
+GC19 <- grangertest(DependendVariable ~ OilPrice,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "OilPrice") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$OilPrice))
+
+GC20 <- grangertest(DependendVariable ~ `USD/DKK`,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "USD/DKK") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$`USD/DKK`))
+
+GC_Vestas <- rbind(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20) %>% as.data.frame()
+```
+The significant features is chosen.
+```{r}
+GC_Vestas %>%
+    filter(GrangerCausitality <= 0.1)
+```
+For *Vestas* the features *MaerskA*, *MaerskB*, *Baverian*, *Coloplast*, *FLSmidth*,  *Genmab*, *GN*, *Lundbeck*, *NovoNordisk*, *Tryg* and *USD/DKK* is chosen. These variables is selected including *Date* and the dependent value *Vestas* is chosen.
+```{r}
+data_Vestas <- data %>%
+  select(Date, Vestas, MaerskA, MaerskB, Baverian, Coloplast, FLSmidth, Genmab, GN, Lundbeck, NovoNordisk, Tryg,`USD/DKK`)
+```
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20,GC_Vestas,DependendVariable,Order_lags)
+```
+## Investegating the data
+Plotting each variable individually. 
+```{r}
+Plot1 <-  data_Vestas  %>% ggplot(aes(y = Vestas, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Vestas")
+
+Plot2 <-  data_Vestas  %>% ggplot(aes(y = MaerskA, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " Maersk A")
+
+Plot3 <-  data_Vestas %>% ggplot(aes(y = MaerskB, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Maersk B")
+
+Plot4 <-  data_Vestas %>%   ggplot(aes(y = Baverian, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Baverian")
+  
+Plot5 <-  data_Vestas %>%   ggplot(aes(y =  Coloplast, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "  Coloplast")
+  
+Plot6 <-  data_Vestas %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Vestas %>% ggplot(aes(y =Genmab, x = Date)) + geom_line(col = "darkslategray3") + theme(legend.position = "none")     + labs(y="" ,x = "Genmab")
+
+Plot8 <-  data_Vestas %>% ggplot(aes(y = GN, x = Date)) + geom_line(col = "darkseagreen4") + theme(legend.position = "none")  + labs(y="" ,x = "GN")
+
+Plot9 <-  data_Vestas %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col = "chartreuse4") + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")
+
+Plot10 <-  data_Vestas %>% ggplot(aes(y = NovoNordisk, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")
+
+Plot11 <-  data_Vestas %>% ggplot(aes(y = Tryg, x = Date)) + geom_line(col = "cadetblue3") + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")
+
+Plot12 <-  data_Vestas %>% ggplot(aes(y = `USD/DKK`, x = Date)) + geom_line(col = "darkolivegreen3") + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6)
+annotate_figure(Plot_Collected, top = text_grob("The dependent variable (red) and its features", size = 15))
+```
+### Boxplot
+Creating a summary in order to investigate each variable.
+```{r}
+data_Vestas %>% select(-Date) %>%  summary() 
+```
+Besides *Vestas*, *Vestas* has both the lowest and highest value.  
+
+Creating a box plot for each variable. (I created two boxplot because I am not sure which one to pick).
+```{r}
+Plot1 <-  data_Vestas %>% ggplot(aes(y = Vestas, x = Date,  col= "red") ) +   geom_boxplot()  + theme(legend.position = "none") + labs(y="" ,x = "Vestas")
+
+Plot2 <-  data_Vestas%>% ggplot(aes(y = MaerskA, x = Date)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " MaerskA")
+
+Plot3 <-  data_Vestas  %>% ggplot(aes(y = MaerskB, x = Date)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "MaerskB")
+
+Plot4 <-  data_Vestas %>%ggplot(aes(y = Baverian, x = Date)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Baverian")
+  
+Plot5 <-  data_Vestas %>% ggplot(aes(y =  Coloplast, x = Date)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "William Demant")
+  
+Plot6 <-  data_Vestas %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <- data_Vestas %>% ggplot(aes(y =Genmab, x = Date)) + geom_boxplot(col = "darkslategray3") + theme(legend.position = "none")     + labs(y="" ,x = "Genmab")
+
+Plot8 <-  data_Vestas %>% ggplot(aes(y = GN, x = Date)) + geom_boxplot(col = "darkseagreen4") + theme(legend.position = "none")  + labs(y="" ,x = "GN")
+
+Plot9 <-  data_Vestas %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_boxplot(col = "chartreuse4") + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")
+
+Plot10 <-  data_Vestas %>% ggplot(aes(y = NovoNordisk, x = Date)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")
+
+Plot11 <-  data_Vestas %>% ggplot(aes(y = Tryg, x = Date)) + geom_boxplot(col = "cadetblue3") + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")
+
+Plot12 <-  data_Vestas %>% ggplot(aes(y = `USD/DKK`, x = Date)) + geom_boxplot(col = "darkolivegreen3") + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6)
+annotate_figure(Plot_Collected, top = text_grob("Boxplot for the dependent variable (red) and its features", size = 15))
+```
+When plotting the date by using the *gather* function, the stocks is plotted in alphabetic order. To get the same order as the other plots, the plots is recorded into a number and a factor, then the number is given a level, and then given a number is given a label corresponding the name of the company.
+```{r}
+data_Vestas_plot<- gather(data_Vestas, Company, Value, -Date)
+data_Vestas_plot %<>% mutate(Company = ifelse(Company == "Vestas", 1, 
+                           ifelse(Company == "MaerskA", 2,
+                           ifelse(Company == "MaerskB", 3, 
+                           ifelse(Company == "Baverian", 4, 
+                           ifelse(Company == " Coloplast", 5,
+                           ifelse(Company == "FLSmidth", 6,
+                           ifelse(Company == "Genmab", 7, 
+                           ifelse(Company == "GN", 8,
+                           ifelse(Company == "Lundbeck", 9,
+                           ifelse(Company == "NovoNordisk", 10,
+                           ifelse(Company == "Tryg", 11,
+                           ifelse(Company == "USD/DKK", 12, "test")))))))))))))
+data_Vestas_plot$Company <- factor(as.numeric(data_Vestas_plot$Company), 
+          levels = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12), 
+          labels = c("Vestas", "MaerskA", "MaerskB", "Baverian", "William Demant", "FLSmidth", "Genmab", "GN", "Lundbeck", "NovoNordisk", "Tryg", "USD/DKK"))
+```
+
+The second box plot.
+```{r fig.height=5, fig.width=6}
+data_Vestas_plot%>%
+ggplot( aes(x=Company, y=Value)) + geom_boxplot(col = c("coral", "cornflowerblue", "skyblue","darkgreen", "darkolivegreen4", "deepskyblue4", "darkslategray3", "darkseagreen4", "chartreuse4", "deepskyblue3",  "cadetblue3", "darkolivegreen3"))+ scale_y_log10()  + labs(y="", x = "Company")
+```
+
+A yearly boxplot is made for each variable. This shows if the rise/fall the stock did a year were distributed on a few observation or were more consistent. 
+```{r}
+Plot1 <- data_Vestas %>% select(Date, Vestas) %>%mutate(Year = format(Date, "%Y" )) %>%  ggplot(aes(x=Year, y=Vestas)) + geom_boxplot(col = "coral")+ theme(legend.position = "none") + labs(y="" ,x = "Vestas")
+
+Plot2 <-  data_Vestas%>% select(Date,MaerskA) %>%mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(x = Year, y = MaerskA)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " MaerskA")
+
+Plot3 <-  data_Vestas  %>% select(Date, MaerskB) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = MaerskB)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "MaerskB")
+
+Plot4 <-  data_Vestas %>%select(Date, Baverian) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Baverian)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Baverian")
+  
+Plot5 <-  data_Vestas %>%select(Date,  Coloplast) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y =  Coloplast)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "Oil Price")   
+
+Plot6 <-  data_Vestas%>%select(Date, FLSmidth) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = FLSmidth)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Vestas%>%select(Date, Genmab) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Genmab)) + geom_boxplot(col = "darkslategray3") + theme(legend.position = "none")     + labs(y="" ,x = "Genmab")
+
+Plot8 <-  data_Vestas %>%select(Date, GN) %>% mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(y = GN, x = Year))  + geom_boxplot(col = "darkseagreen4") + theme(legend.position = "none")  + labs(y="" ,x = "GN")
+
+Plot9 <-  data_Vestas  %>%select(Date, Lundbeck) %>% mutate(Year = format(Date, "%Y" ))  %>% ggplot(aes(y = Lundbeck, x = Year)) + geom_boxplot(col = "chartreuse4") + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")
+
+Plot10 <-  data_Vestas%>%select(Date, NovoNordisk) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(y = NovoNordisk, x = Year))   + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")
+
+Plot11 <-  data_Vestas%>%select(Date, Tryg) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(y = Tryg, x = Year))   + geom_boxplot(col = "cadetblue3")  + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")
+
+Plot12 <-  data_Vestas%>%select(Date, `USD/DKK`) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(y = `USD/DKK`, x = Year))   + geom_boxplot(col = "darkolivegreen3") + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6) 
+annotate_figure(Plot_Collected, top = text_grob("Yearly box plot for the dependent variable (red) and its features", size = 15))
+```
+### Density plot
+Plotting a density plot and the mean for each variable. 
+```{r}
+Plot1 <-  data_Vestas %>% ggplot(aes(x = Vestas, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Vestas)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Vestas")
+
+Plot2 <-  data_Vestas%>% ggplot(aes(x = MaerskA)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(MaerskA)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " MaerskA")
+
+Plot3 <-  data_Vestas  %>% ggplot(aes(x = MaerskB)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(MaerskB)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "MaerskB")
+
+Plot4 <-  data_Vestas %>%ggplot(aes(x = Baverian)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Baverian)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Baverian")
+  
+Plot5 <-  data_Vestas %>% ggplot(aes(x =  Coloplast)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean( Coloplast)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Coloplast")
+
+Plot6 <-  data_Vestas %>% ggplot(aes(x = FLSmidth)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)), color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "FLSmidth")
+ 
+Plot7 <-  data_Vestas %>% ggplot(aes(x =Genmab)) + geom_density(col = "darkslategray3") + geom_vline(aes(xintercept=mean(Genmab)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none") + labs(y="" ,x = "Genmab")
+
+Plot8 <-  data_Vestas %>% ggplot(aes(x = GN)) + geom_density(col = "darkseagreen4") + geom_vline(aes(xintercept=mean(GN)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "GN")
+
+Plot9 <-  data_Vestas %>% ggplot(aes(x = Lundbeck)) + geom_density(col = "chartreuse4") + geom_vline(aes(xintercept=mean(Lundbeck)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")
+
+Plot10 <-  data_Vestas %>% ggplot(aes(x = NovoNordisk)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(NovoNordisk)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")
+
+Plot11 <-  data_Vestas %>% ggplot(aes(x = Tryg)) + geom_density(col = "cadetblue3") + geom_vline(aes(xintercept=mean(Tryg)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")
+
+Plot12 <-  data_Vestas %>% ggplot(aes(x = `USD/DKK`)) + geom_density(col = "darkolivegreen3")+ geom_vline(aes(xintercept=mean(`USD/DKK`)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dashed line is the mean of each variable", size = 10))
+```
+
+## The change in stock
+Creating a new data set for change in price in per cent. 
+```{r}
+data_Vestas_Change <- data_Vestas %>%
+  mutate(Vestas  = ((Vestas-lag(Vestas))/lag(Vestas))*100,
+         MaerskA = ((MaerskA-lag(MaerskA))/lag(MaerskA))*100,
+         MaerskB = ((MaerskB-lag(MaerskB))/lag(MaerskB))*100,
+         Baverian = ((Baverian-lag(Baverian))/lag(Baverian))*100,
+         Coloplast = (( Coloplast-lag( Coloplast))/lag( Coloplast))*100,
+         FLSmidth = ((FLSmidth-lag(FLSmidth))/lag(FLSmidth))*100,
+         Genmab = ((Genmab-lag(Genmab))/lag(Genmab))*100,
+         GN = ((GN-lag(GN))/lag(GN))*100,
+         Lundbeck = ((Lundbeck-lag(Lundbeck))/lag(Lundbeck))*100,
+         NovoNordisk = ((NovoNordisk-lag(NovoNordisk))/lag(NovoNordisk))*100,
+         Tryg = ((Tryg-lag(Tryg))/lag(Tryg))*100,
+         `USD/DKK` = ((`USD/DKK`-lag(`USD/DKK`))/lag(`USD/DKK`))*100) %>%
+         drop_na()
+```
+
+Plotting the change in per cent for each variable individually. This shows how volatile each variable is. 
+```{r}
+Plot1 <-  data_Vestas_Change  %>% ggplot(aes(y = Vestas, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Vestas")
+
+Plot2 <-  data_Vestas_Change  %>% ggplot(aes(y = MaerskA, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " Maersk A")
+
+Plot3 <-  data_Vestas_Change %>% ggplot(aes(y = MaerskB, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "Maersk B")
+
+Plot4 <-  data_Vestas_Change %>%   ggplot(aes(y = Baverian, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " Baverian")
+  
+Plot5 <-  data_Vestas_Change %>%   ggplot(aes(y =  Coloplast, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "  Coloplast")
+  
+Plot6 <-  data_Vestas_Change %>% ggplot(aes(y = FLSmidth, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Oil Price")
+ 
+Plot7 <-  data_Vestas_Change %>% ggplot(aes(y =Genmab, x = Date)) + geom_line(col = "darkslategray3") + theme(legend.position = "none")     + labs(y="" ,x = "Genmab")
+
+Plot8 <-  data_Vestas_Change %>% ggplot(aes(y = GN, x = Date)) + geom_line(col = "darkseagreen4") + theme(legend.position = "none")  + labs(y="" ,x = "GN")
+
+Plot9 <-  data_Vestas_Change %>% ggplot(aes(y = Lundbeck, x = Date)) + geom_line(col = "chartreuse4") + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")
+
+Plot10 <-  data_Vestas_Change %>% ggplot(aes(y = NovoNordisk, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")
+
+Plot11 <-  data_Vestas_Change %>% ggplot(aes(y = Tryg, x = Date)) + geom_line(col = "cadetblue3") + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")
+
+Plot12 <-  data_Vestas_Change %>% ggplot(aes(y = `USD/DKK`, x = Date)) + geom_line(col = "darkolivegreen3") + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6)
+annotate_figure(Plot_Collected, top = text_grob("Change in percent for the dependent variable (red) and its features", size = 15))
+```
+*Vestas* has by far the highest change in price in a day with 45 per cent. 
+### Density plot
+Plotting the distribition for each variable
+```{r}
+Plot1 <-  data_Vestas_Change %>% ggplot(aes(x = Vestas, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Vestas)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Vestas")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot2 <-  data_Vestas_Change %>% ggplot(aes(x = MaerskA)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(MaerskA)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " MaerskA")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot3 <-  data_Vestas_Change  %>% ggplot(aes(x = MaerskB)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(MaerskB)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "MaerskB")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot4 <-  data_Vestas_Change %>%ggplot(aes(x = Baverian)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Baverian)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Baverian")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+  
+Plot5 <-  data_Vestas_Change %>% ggplot(aes(x =  Coloplast)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean( Coloplast)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Coloplast")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot6 <-  data_Vestas_Change %>% ggplot(aes(x = FLSmidth)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(FLSmidth)), color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "FLSmidth")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+ 
+Plot7 <-  data_Vestas_Change %>% ggplot(aes(x =Genmab)) + geom_density(col = "darkslategray3") + geom_vline(aes(xintercept=mean(Genmab)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none") + labs(y="" ,x = "Genmab")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot8 <-  data_Vestas_Change %>% ggplot(aes(x = GN)) + geom_density(col = "darkseagreen4") + geom_vline(aes(xintercept=mean(GN)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "GN")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot9 <-  data_Vestas_Change %>% ggplot(aes(x = Lundbeck)) + geom_density(col = "chartreuse4") + geom_vline(aes(xintercept=mean(Lundbeck)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "Lundbeck")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot10 <-  data_Vestas_Change %>% ggplot(aes(x = NovoNordisk)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(NovoNordisk)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "NovoNordisk")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot11 <-  data_Vestas_Change %>% ggplot(aes(x = Tryg)) + geom_density(col = "cadetblue3") + geom_vline(aes(xintercept=mean(Tryg)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "Tryg")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+Plot12 <-  data_Vestas_Change %>% ggplot(aes(x = `USD/DKK`)) + geom_density(col = "darkolivegreen3")+ geom_vline(aes(xintercept=mean(`USD/DKK`)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")  + labs(y="" ,x = "USD/DKK")  + labs(y="" ,x = "USD/DKK")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.85)) 
+
+```
+
+
+```{r fig.height=6, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, ncol = 2, nrow = 6)
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dash line is the mean of each feature", size = 10))
+```
+All of the variable seems to have a normal distribution. Both *Vestas* and *NovoNordisk* seems to have a higher mean than the rest.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(Plot1, Plot_Baverian, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot8, Plot9, Plot10, Plot11, Plot12, Plot_Collected, data_Vestas_plot, data_Vestas_Change)
+```
+## Saving the data set
+The Vestas data set is now done and ready for forecast. It is saved as a cvs-file and uploaded on [Github](https://github.com/andreasbj77/Master-thesis?fbclid=IwAR1-uXAsXOvRxWwDzpfhzjiqyOhil9E4wklrK03_fRMZhLQ7EYTrooHzTw0)
+```{r}
+setwd("~/Desktop")
+write_as_csv(data_Vestas,"DataCreationVestas.csv")
+```
+
+```{r}
+rm(data_Vestas)
+```
+
+# Consumption - Carlsberg
+## Selection of features
+Calculating granger causality for each value and *Carlsberg*. Five lags each chosen for this study.
+```{r}
+Order_lags <- 5
+DependendVariable <- data$Carlsberg
+ 
+GC1 <- grangertest(DependendVariable ~MaerskA,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskA") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC2 <- grangertest(DependendVariable ~MaerskB,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "MaerskB") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(data$MaerskA, DependendVariable))
+
+GC3 <- grangertest(DependendVariable ~ Baverian,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Baverian") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Baverian))
+
+GC4 <- grangertest(DependendVariable ~ Coloplast,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Coloplast") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Coloplast))
+
+GC5 <- grangertest(DependendVariable ~ DanskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DanskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DanskeBank))
+
+GC6 <- grangertest(DependendVariable ~ DSV,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "DSV") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$DSV))
+
+GC7 <- grangertest(DependendVariable ~ FLSmidth,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "FLSmidth") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$MaerskA))
+
+GC8 <- grangertest(DependendVariable ~ Genmab,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Genmab") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Genmab))
+
+GC9 <- grangertest(DependendVariable ~ GN,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "GN") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$GN))
+
+GC10 <- grangertest(DependendVariable ~ JyskeBank,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "JyskeBank") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$JyskeBank))
+
+GC11 <- grangertest(DependendVariable ~ Lundbeck,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Lundbeck") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Lundbeck))
+
+GC12 <- grangertest(DependendVariable ~ NKT,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NKT") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$NKT))
+
+GC13 <- grangertest(DependendVariable ~ Nordea,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Nordea") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality)%>% mutate(Correlation = cor(DependendVariable , data$Nordea))
+
+GC14 <- grangertest(DependendVariable ~ NovoNordisk,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "NovoNordisk") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$NovoNordisk))
+
+GC15 <- grangertest(DependendVariable ~ Novozymes,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Novozymes") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Novozymes))
+
+GC16 <- grangertest(DependendVariable ~ Tryg,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Tryg") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Tryg))
+
+GC17 <- grangertest(DependendVariable ~ Vestas,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "Vestas") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$Vestas))
+
+GC18 <- grangertest(DependendVariable ~ WilliamDemant,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "WilliamDemant") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$WilliamDemant))
+
+GC19 <- grangertest(DependendVariable ~ OilPrice,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "OilPrice") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$OilPrice))
+
+GC20 <- grangertest(DependendVariable ~ `USD/DKK`,  order = Order_lags, data = data) %>%
+ drop_na() %>% mutate(Company = "USD/DKK") %>% rename("GrangerCausitality"="Pr(>F)" ) %>%select(Company,GrangerCausitality) %>% mutate(Correlation = cor(DependendVariable , data$`USD/DKK`))
+
+GC_Carlsberg <- rbind(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20) %>% as.data.frame()
+```
+The significant features is chosen.
+```{r}
+GC_Carlsberg %>%
+    filter(GrangerCausitality <= 0.1)
+```
+For *Carlsberg* the features *DanskeBank*, *DSV*, *GN*, *JyskeBank*, *Tryg* and *OilPrice*  is chosen. These variables is selected including *Date* and the dependent value *Carlsberg* is chosen.
+```{r}
+data_Carlsberg <- data %>%
+  select(Date, Carlsberg, DanskeBank, DSV, GN, JyskeBank, Tryg, OilPrice)
+```
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(GC1,GC2,GC3,GC4,GC5,GC6,GC7,GC8,GC9,GC10,GC11,GC12,GC13,GC14,GC15,GC16,GC17,GC18,GC19,GC20,GC_Carlsberg,DependendVariable,Order_lags)
+```
+
+## Investegating 
+Plotting each variable individually. 
+```{r}
+Plot1 <-  data_Carlsberg  %>% ggplot(aes(y = Carlsberg, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Carlsberg")
+
+Plot2 <-  data_Carlsberg  %>% ggplot(aes(y = DanskeBank, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " DanskeBank")
+
+Plot3 <-  data_Carlsberg %>% ggplot(aes(y = DSV, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "DSV")
+
+Plot4 <-  data_Carlsberg %>%   ggplot(aes(y = GN, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " GN")
+  
+Plot5 <-  data_Carlsberg %>%   ggplot(aes(y = JyskeBank, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "JyskeBank")
+  
+Plot6 <-  data_Carlsberg %>% ggplot(aes(y = Tryg, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Tryg")
+ 
+Plot7 <-  data_Carlsberg %>% ggplot(aes(y =OilPrice, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)
+annotate_figure(Plot_Collected, top = text_grob("The dependent variable (red) and its features", size = 15))
+```
+### Boxplot
+Creating a summary in order to investigate each variable.
+```{r}
+data_Carlsberg %>% select(-Date) %>%  summary() 
+```
+Besides *Carlsberg*, *Carlsberg* has both the lowest and highest value.  
+
+Creating a box plot for each variable. (I created two boxplot because I am not sure which one to pick).
+```{r}
+Plot1 <-  data_Carlsberg %>% ggplot(aes(y = Carlsberg, x = Date,  col= "red") ) +   geom_boxplot()  + theme(legend.position = "none") + labs(y="" ,x = "Carlsberg")
+
+Plot2 <-  data_Carlsberg%>% ggplot(aes(y = DanskeBank, x = Date)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " DanskeBank")
+
+Plot3 <-  data_Carlsberg  %>% ggplot(aes(y = DSV, x = Date)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "DSV")
+
+Plot4 <-  data_Carlsberg %>%ggplot(aes(y = GN, x = Date)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " GN")
+  
+Plot5 <-  data_Carlsberg %>% ggplot(aes(y = JyskeBank, x = Date)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "JyskeBank")
+  
+Plot6 <-  data_Carlsberg %>% ggplot(aes(y = Tryg, x = Date)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Tryg")
+ 
+Plot7 <- data_Carlsberg %>% ggplot(aes(y =OilPrice, x = Date)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)
+annotate_figure(Plot_Collected, top = text_grob("Boxplot for the dependent variable (red) and its features", size = 15))
+```
+When plotting the date by using the *gather* function, the stocks is plotted in alphabetic order. To get the same order as the other plots, the plots is recorded into a number and a factor, then the number is given a level, and then given a number is given a label corresponding the name of the company.
+```{r}
+data_Carlsberg_plot<- gather(data_Carlsberg, Company, Value, -Date)
+data_Carlsberg_plot %<>% mutate(Company = ifelse(Company == "Carlsberg", 1, 
+                           ifelse(Company == "DanskeBank", 2,
+                           ifelse(Company == "DSV", 3, 
+                           ifelse(Company == "GN", 4, 
+                           ifelse(Company == "JyskeBank", 5,
+                           ifelse(Company == "Tryg", 6,
+                           ifelse(Company == "OilPrice", 7, "test"))))))))
+data_Carlsberg_plot$Company <- factor(as.numeric(data_Carlsberg_plot$Company), 
+          levels = c(1, 2, 3, 4, 5, 6, 7), 
+          labels = c("Carlsberg", "Danske Bank", "DSV", "GN", "Jyske Bank", "Tryg", "Oil Price"))
+```
+
+The second box plot.
+```{r fig.height=5, fig.width=6}
+data_Carlsberg_plot%>%
+ggplot( aes(x=Company, y=Value)) + geom_boxplot(col = c("coral", "cornflowerblue", "skyblue","darkgreen", "darkolivegreen4", "deepskyblue4", "deepskyblue3"))+ scale_y_log10()  + labs(y="", x = "Company")
+```
+
+A yearly boxplot is made for each variable. This shows if the rise/fall the stock did a year were distributed on a few observation or were more consistent. 
+```{r}
+Plot1 <- data_Carlsberg %>% select(Date, Carlsberg) %>%mutate(Year = format(Date, "%Y" )) %>%  ggplot(aes(x=Year, y=Carlsberg)) + geom_boxplot(col = "coral")+ theme(legend.position = "none") + labs(y="" ,x = "Carlsberg")
+
+Plot2 <-  data_Carlsberg%>% select(Date,DanskeBank) %>%mutate(Year = format(Date, "%Y" ))%>% ggplot(aes(x = Year, y = DanskeBank)) + geom_boxplot(col = "cornflowerblue") + theme(legend.position = "none") + labs(y="", x = " Danske Bank")
+
+Plot3 <-  data_Carlsberg  %>% select(Date, DSV) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = DSV)) + geom_boxplot(col= "skyblue") + theme(legend.position = "none")  + labs(y="", x = "DSV")
+
+Plot4 <-  data_Carlsberg %>%select(Date, GN) %>%mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = GN)) + geom_boxplot(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " GN")
+  
+Plot5 <-  data_Carlsberg %>%select(Date, JyskeBank) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = JyskeBank)) + geom_boxplot(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = "Jyske Bank")   
+
+Plot6 <-  data_Carlsberg%>%select(Date, Tryg) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y = Tryg)) + geom_boxplot(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Tryg")
+ 
+Plot7 <-  data_Carlsberg%>%select(Date, OilPrice) %>% mutate(Year = format(Date, "%Y" )) %>% ggplot(aes(x = Year, y =OilPrice)) + geom_boxplot(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Yearly box plot for the dependent variable (red) and its features", size = 15))
+```
+### Density plot
+Plotting a density plot and the mean for each variable. 
+```{r}
+Plot1 <-  data_Carlsberg %>% ggplot(aes(x = Carlsberg, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Carlsberg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Carlsberg")
+
+Plot2 <-  data_Carlsberg%>% ggplot(aes(x = DanskeBank)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(DanskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Danske Bank")
+
+Plot3 <-  data_Carlsberg  %>% ggplot(aes(x = DSV)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(DSV)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "DSV")
+
+Plot4 <-  data_Carlsberg %>%ggplot(aes(x = GN)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(GN)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "GN")
+  
+Plot5 <-  data_Carlsberg %>% ggplot(aes(x = JyskeBank)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(JyskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Jyske Bank")
+
+Plot6 <-  data_Carlsberg %>% ggplot(aes(x = Tryg)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") +geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Tryg")
+ 
+Plot7 <-  data_Carlsberg %>% ggplot(aes(x =OilPrice)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(OilPrice)),
+            color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dashed line is the mean of each variable", size = 10))
+```
+
+## The change in stock
+Creating a new data set for change in price in per cent. 
+```{r}
+data_Carlsberg_Change <- data_Carlsberg %>%
+  mutate(Carlsberg  = ((Carlsberg-lag(Carlsberg))/lag(Carlsberg))*100,
+         DanskeBank = ((DanskeBank-lag(DanskeBank))/lag(DanskeBank))*100,
+         DSV = ((DSV-lag(DSV))/lag(DSV))*100,
+         GN = ((GN-lag(GN))/lag(GN))*100,
+         JyskeBank = ((JyskeBank-lag(JyskeBank))/lag(JyskeBank))*100,
+         Tryg = ((Tryg-lag(Tryg))/lag(Tryg))*100,
+         OilPrice = ((OilPrice-lag(OilPrice))/lag(OilPrice))*100) %>%
+         drop_na()
+```
+
+Plotting the change in per cent for each variable individually. This shows how volatile each variable is. 
+```{r}
+Plot1 <-  data_Carlsberg_Change  %>% ggplot(aes(y = Carlsberg, x = Date,  col= "red") ) + geom_line()  + theme(legend.position = "none")  + labs(y="" ,x = "Carlsberg")
+
+Plot2 <-  data_Carlsberg_Change  %>% ggplot(aes(y = DanskeBank, x = Date)) + geom_line(col = "cornflowerblue") + theme(legend.position = "none") + labs(y= "", x = " Danske Bank")
+
+Plot3 <-  data_Carlsberg_Change %>% ggplot(aes(y = DSV, x = Date)) + geom_line(col= "skyblue") + theme(legend.position = "none") + labs(y="", x = "DSV")
+
+Plot4 <-  data_Carlsberg_Change %>%   ggplot(aes(y = GN, x = Date)) + geom_line(col= "darkgreen") + theme(legend.position = "none") + labs(y="", x = " GN")
+  
+Plot5 <-  data_Carlsberg_Change %>%   ggplot(aes(y = JyskeBank, x = Date)) + geom_line(col= "darkolivegreen4") + theme(legend.position = "none") + labs(y="", x = " Jyske Bank")
+  
+Plot6 <-  data_Carlsberg_Change %>% ggplot(aes(y = Tryg, x = Date)) + geom_line(col = "deepskyblue4") + theme(legend.position = "none")     + labs(y="", x = "Tryg")
+ 
+Plot7 <-  data_Carlsberg_Change %>% ggplot(aes(y =OilPrice, x = Date)) + geom_line(col = "deepskyblue3") + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Change in percent for the dependent variable (red) and its features", size = 15))
+```
+*Carlsberg* has by far the highest change in price in a day with 45 per cent. 
+### Density plot
+Plotting the distribition for each variable
+```{r}
+Plot1 <-  data_Carlsberg_Change %>% ggplot(aes(x = Carlsberg, col= "red") ) +   geom_density()  + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(Carlsberg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="" ,x = "Carlsberg") + scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+Plot2 <-  data_Carlsberg_Change%>% ggplot(aes(x = DanskeBank)) + geom_density( col = "cornflowerblue") + theme(legend.position = "none") + geom_vline(aes(xintercept=mean(DanskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = " Danske Bank")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+
+Plot3 <-  data_Carlsberg_Change  %>% ggplot(aes(x = DSV)) + geom_density(col= "skyblue") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(DSV)),
+            color="darkgrey", linetype="dashed", size=1)   + labs(y="", x = "DSV")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+
+Plot4 <-  data_Carlsberg_Change %>%ggplot(aes(x = GN)) + geom_density(col= "darkgreen") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(GN)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "GN")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+  
+Plot5 <-  data_Carlsberg_Change %>% ggplot(aes(x = JyskeBank)) + geom_density(col= "darkolivegreen4") + theme(legend.position = "none")+ geom_vline(aes(xintercept=mean(JyskeBank)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Jyske Bank")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+
+Plot6 <-  data_Carlsberg_Change %>% ggplot(aes(x = Tryg)) + geom_density(col = "deepskyblue4") + theme(legend.position = "none") +geom_vline(aes(xintercept=mean(Tryg)),
+            color="darkgrey", linetype="dashed", size=1) + labs(y="", x = "Tryg")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+ 
+Plot7 <-  data_Carlsberg_Change %>% ggplot(aes(x =OilPrice)) + geom_density(col = "deepskyblue3") + geom_vline(aes(xintercept=mean(OilPrice)), color="darkgrey", linetype="dashed", size=1) + theme(legend.position = "none")     + labs(y="" ,x = "Oil Price")+ scale_x_continuous(limits = c(-5,5))+ scale_y_continuous(limits = c(0,0.45)) 
+
+```
+
+
+```{r fig.height=5, fig.width=6}
+Plot_Collected<-ggarrange(Plot1, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, ncol = 2, nrow = 4)  
+annotate_figure(Plot_Collected, top = text_grob("Density plot for the dependent variable (red) and its features", size = 15),  bottom = text_grob("Grey dash line is the mean of each feature", size = 10))
+```
+All of the variable seems to have a normal distribution. Both *Carlsberg* and *NovoNordisk* seems to have a higher mean than the rest.
+
+Cleaning the environment from unnecessary data sets.
+```{r}
+rm(Plot1, Plot_Baverian, Plot2, Plot3, Plot4, Plot5, Plot6, Plot7, Plot_Collected, data_Carlsberg_plot, data_Carlsberg_Change)
+```
+
+## Saving the data set
+The Carlsberg data set is now done and ready for forecast. It is saved as a cvs-file and uploaded on [Github](https://github.com/andreasbj77/Master-thesis?fbclid=IwAR1-uXAsXOvRxWwDzpfhzjiqyOhil9E4wklrK03_fRMZhLQ7EYTrooHzTw0)
+```{r}
+setwd("~/Desktop")
+write_as_csv(data_Carlsberg,"DataCreationCarlsberg.csv")
+```
+
+```{r}
+rm(data_Carlsberg)
+```
+
+
+
+
+
+
