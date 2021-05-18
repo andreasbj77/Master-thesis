@@ -43,12 +43,17 @@ library(tidyverse)
 
 Downloading the data directly from github
 ```{r}
-Vestas <- read_csv("E:/Forecast/Vestas/forecast_Vestas") %>% select(Model, RMSE, MAPE)
-Genmab <- read_csv("E:/Forecast/Genmab/forecast_Genmab") %>% select(Model, RMSE, MAPE)
-Carlsberg <- read_csv("E:/Forecast/Carlsberg/forecast_Carlsberg") %>% select(Model, RMSE, MAPE)
-JyskeBank <- read_csv("E:/Forecast/JyskeBank/forecast_JyskeBank") %>% select(Model, RMSE, MAPE)
-MaerskB <- read_csv("E:/Forecast/MaerskB/forecast_MaerskB") %>% select(Model, RMSE, MAPE)
-SimCorp <- read_csv("E:/Forecast/SimCorp/forecast_SimCorp") %>% select(Model, RMSE, MAPE)
+Vestas <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_Vestas") %>% select(Model, RMSE, MAPE)
+
+Genmab <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_Genmab") %>% select(Model, RMSE, MAPE)
+
+Carlsberg <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_Carlsberg") %>% select(Model, RMSE, MAPE)
+
+JyskeBank <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_JyskeBank") %>% select(Model, RMSE, MAPE)
+
+MaerskB <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_MaerskB") %>% select(Model, RMSE, MAPE)
+
+SimCorp <- read_csv("https://raw.githubusercontent.com/andreasbj77/Master-thesis/main/Code/Machine%20learning/Forecasting/Forecasting_Results/forecast_SimCorp") %>% select(Model, RMSE, MAPE)
 ```
 
 The RMSE for each model and stock
