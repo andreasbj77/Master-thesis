@@ -235,7 +235,7 @@ ggarrange(plot_ARIMA_JyskeBank, plot_ANN_JyskeBank, ncol = 1, common.legend = TR
 ## MaerskB
 
 ```{r}
-plot_ARIMA_MaerskB <- eval_JyskeBank_ARIMA %>% 
+plot_ARIMA_MaerskB <- eval_MaerskB_ARIMA %>% 
   pivot_longer(-Date) %>%
   rename(Data = name) %>%
   ggplot(aes(x = Date, y = value, col = Data, size = Data, alpha = Data)) +
@@ -248,7 +248,7 @@ plot_ARIMA_MaerskB <- eval_JyskeBank_ARIMA %>%
   theme(legend.position= "none") +
   ggtitle("ARIMA")
 
-plot_ANN_MaerskB <- eval_JyskeBank_ANN %>% 
+plot_ANN_MaerskB <- eval_MaerskB_ANN %>% 
   pivot_longer(-Date) %>%
   rename(Data = name) %>%
   ggplot(aes(x = Date, y = value, col = Data, size = Data, alpha = Data)) +
